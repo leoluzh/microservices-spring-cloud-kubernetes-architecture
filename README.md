@@ -578,3 +578,20 @@ ENV _JAVA_OPTIONS "-XX:MinRAMPercentage=60.0 -XX:MaxRAMPercentage=90.0 \
 # set entrypoint to layered Spring Boot application
 ENTRYPOINT ["java", "org.springframework.boot.loader.JarLauncher"]
 ```
+
+Construir a imagem Docker para o `department-service` aplicativo
+
+```script
+cd /spring-microservices-k8s/department-service/
+docker build -t vmware/department:1.1 .
+```
+
+e construir outros microservices: `employee-service`, `gateway-service`, `organization-service`.
+
+Listar imagens do Docker
+
+```
+docker images
+```
+
+A ferramenta [Dive](https://github.com/wagoodman/dive) pode ser usada para explorar e analisar imagens e camadas do Docker. O abaixo exibe a buildimage. O Docker `Image Id` pode ser usado para explorar detalhes da imagem.
