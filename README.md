@@ -192,3 +192,32 @@ kubectl create serviceaccount api-service-account -n mongo
 
 vincule contas de serviço `api-service-account` de cada namespace a `ClusterRole`
 
+```script
+kubectl create clusterrolebinding service-pod-reader-department --clusterrole=microservices-kubernetes-namespace-reader --serviceaccount=department:api-service-account
+kubectl create clusterrolebinding service-pod-reader-employee --clusterrole=microservices-kubernetes-namespace-reader --serviceaccount=employee:api-service-account
+kubectl create clusterrolebinding service-pod-reader-gateway --clusterrole=microservices-kubernetes-namespace-reader --serviceaccount=gateway:api-service-account
+kubectl create clusterrolebinding service-pod-reader-organization --clusterrole=microservices-kubernetes-namespace-reader --serviceaccount=organization:api-service-account
+kubectl create clusterrolebinding service-pod-reader-mongo --clusterrole=microservices-kubernetes-namespace-reader --serviceaccount=mongo:api-service-account
+```
+
+e certifique-se de que os manifestos de implantações para cada conta de serviço de referência de microserviços `api-service-account`
+
+* `/spring-microservices-k8s/k8s/department-deployment.yaml`
+
+* `/spring-microservices-k8s/k8s/employee-deployment.yaml`
+
+* `/spring-microservices-k8s/k8s/organization-deployment.yaml`
+
+
+```
+# other config removed for brevity.
+serviceAccountName: api-service-account
+```
+
+## Nomenclatura de serviço kubernetes
+
+Cada serviço definido no cluster (incluindo o próprio servidor DNS) recebe um nome DNS. Os serviços ''normais'' (not headless) são atribuídos a um registro DNS A ou AAAA, dependendo da família de IP do serviço, para um nome na forma `my-svc.my-namespace.svc.cluster-domain.example`. Isso é resolvido para o IP do cluster do serviço. 
+
+Os registros DNS para cada serviços são os seguintes:
+
+![Arquitetura de Referência - registros DNS para serviços](./resources/architecture-dns.png)
