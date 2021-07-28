@@ -432,3 +432,149 @@ data:
 ```
 
 ## Utilizando Spring Boot Actuator para exportar métricas para Prometheus
+
+[Prometheus](https://prometheus.io/) é um sistema de monitoramento de código aberto. Spring Boot usa [Micrometer](http://micrometer.io/) , uma fachada de métricas de aplicativo para integrar métricas [Spring Boot Actuator](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready) com sistemas de monitoramento externos. Ele suporta vários sistemas de monitoramento como Prometheus, Netflix Atlas, AWS CloudWatch, Datadog, InfluxData, SignalFx, Graphite, Wavefront, etc. O [spring-boot-starter-actuator](https://github.com/spring-projects/spring-boot/tree/main/spring-boot-project/spring-boot-actuator) módulo fornece todos os [recursos prontos para produção](https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html#production-ready-endpoints) do [Spring Boot](https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html#production-ready-endpoints).
+
+Para integrar o Atuador com o Prometheus, você precisa adicionar as seguintes dependências no projeto maven para cada microsserviço:
+
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+<dependency>
+  <groupId>io.micrometer</groupId>
+  <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+```
+
+configure `metrics` e `prometheus` endpoints em configMap para cada projeto ( `department-configmap.yaml`, `employee-configmap.yaml`, `organization-configmap.yaml`):
+
+```yaml
+kind: ConfigMap
+apiVersion: v1
+# removed for brevity
+data:
+  # removed for brevity
+  management.endpoints.web.exposure.include: "health,info,metrics,prometheus"
+  management.metrics.enable.all: "true"
+```
+
+e adicione `MeterRegistryCustomizer` para Grafana [Spring Boot 2.1 Statistics](https://grafana.com/grafana/dashboards/10280) dashboard nas seguintes classes `@SpringBootApplication`: `DepartmentApplication`, `EmployeeApplication`, `GatewayApplication`, `OrganizationApplication` certifique-se de configurar .commonTags("application", "<microservice_name>") com nome atual do microserviço:
+
+```java
+import io.micrometer.core.instrument.MeterRegistry;
+// removed for brevity
+public class DepartmentApplication {
+  // removed for brevity
+  @Bean
+  MeterRegistryCustomizer meterRegistryCustomizer(MeterRegistry meterRegistry){
+    return registry -> {
+      meterRegistry.config().commonTags("application", "department");
+    };
+  }
+}
+```
+
+Os endpoints expostos estão disponíveis em `http://<host>:<port>/actuator/metrics` e `http://<host>:<port>/actuator/prometheus` com dados de métricas formatados especificamente para o Prometheus.
+
+## Construindo aplicações com Spring Cloud Kubernetes
+
+Construção de `department-service`
+
+A partir do [Spring Boot 2.3.1.RELEASE](https://docs.spring.io/spring-boot/docs/current/maven-plugin/reference/htmlsingle/#repackage-layers) , o Spring Boot pode ajudá-lo a empacotar os aplicativos Spring Boot em imagens Docker com Layered Jars.
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-maven-plugin</artifactId>
+      <configuration>
+        <layers>
+          <enabled>true</enabled>
+        </layers>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Depois de construir o projeto com JARs em camadas usando `jarmode` suporte, instale o pacote usando Maven.
+
+```script zsh
+cd /spring-microservices-k8s/department-service/
+mvn clean install
+```
+
+O JAR resultante pode ser testado para verificar se as camadas foram adicionadas.
+
+```script zsh
+cd /spring-microservices-k8s/department-service/
+java -Djarmode=layertools -jar target/department-service-1.1.jar list
+```
+
+Os comandos acima produzirão a seguinte saída e criarão os seguintes diretórios. eles devem ser adicionados:
+
+* dependências
+* dependências instantâneas
+* spring-boot-loader
+* aplicativo
+
+### Construindo imagens Docker para aplicativos Spring
+
+Para criar imagens compatíveis com as melhores práticas, `Dockerfile` deve-se considerar o seguinte.
+
+* Removendo dependências de compilação do tempo de execução
+  * por meio de compilações de vários estágios
+* Colocando dependências (JARs) em sua própria camada
+* Camada do aplicativo JAR
+  * Garantir que os envios de imagens contenham apenas arquivos alterados
+* Executando como não root e usando uma imagem de tempo de execução mínimo
+  * via uso da imagem distroless
+
+```dockerfile
+ARG MVN_VERSION=3.6.3
+ARG JDK_VERSION=11
+
+FROM maven:${MVN_VERSION}-jdk-${JDK_VERSION}-slim as build
+
+WORKDIR /build
+COPY pom.xml .
+# creates layer with maven dependencies
+# first build will be significantly slower than subsequent
+RUN mvn dependency:go-offline
+
+COPY ./pom.xml /tmp/
+COPY ./src /tmp/src/
+WORKDIR /tmp/
+# build the project
+RUN mvn clean package
+
+# extract JAR Layers
+WORKDIR /tmp/target
+RUN java -Djarmode=layertools -jar *.jar extract
+
+# runtime image
+FROM gcr.io/distroless/java:${JDK_VERSION} as runtime
+
+USER nonroot:nonroot
+WORKDIR /application
+
+# copy layers from build image to runtime image as nonroot user
+COPY --from=build --chown=nonroot:nonroot /tmp/target/dependencies/ ./
+COPY --from=build --chown=nonroot:nonroot /tmp/target/snapshot-dependencies/ ./
+COPY --from=build --chown=nonroot:nonroot /tmp/target/spring-boot-loader/ ./
+COPY --from=build --chown=nonroot:nonroot /tmp/target/application/ ./
+
+EXPOSE 8080
+
+ENV _JAVA_OPTIONS "-XX:MinRAMPercentage=60.0 -XX:MaxRAMPercentage=90.0 \
+-Djava.security.egd=file:/dev/./urandom \
+-Djava.awt.headless=true -Dfile.encoding=UTF-8 \
+-Dspring.output.ansi.enabled=ALWAYS \
+-Dspring.profiles.active=default"
+
+# set entrypoint to layered Spring Boot application
+ENTRYPOINT ["java", "org.springframework.boot.loader.JarLauncher"]
+```
