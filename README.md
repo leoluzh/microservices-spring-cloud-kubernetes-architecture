@@ -348,7 +348,87 @@ data:
 ```
 
 * `data.logging.pattern.console`: define o padrão de registro
-* `data.spring.cloud.kubernetes.discovery.all-namespaces` : permite a descoberta de vários namespaces
+* `data.spring.cloud.kubernetes.discovery.all-namespaces : permite a descoberta de vários namespaces
 * `spring.data.mongodb.database`: Nome do Mongo DB
 * `spring.data.mongodb.host`: Localização do Mongo DB
 * `spring.output.ansi.enabled`: Aplicar saída ANSI
+
+## Utilizando Secrets por meio de volumes montados
+
+Kubernetes tem noção de [secrets](https://kubernetes.io/docs/concepts/configuration/secret/) para armazenar dados confidenciais, como senhas, tokens Oath, chaves, etc.
+
+Embora existam várias maneiras de compartilhar segredos com um contêiner, é recomendado compartilhar segredos por meio de volumes montados. 
+Se você habilitar o consumo de segredos por meio da API, recomendamos limitar o acesso com políticas de autorização [RBAC](https://kubernetes.io/docs/concepts/configuration/secret/#best-practices) .
+
+NOTA: os segredos não são seguros, são apenas uma ofuscação
+
+
+Neste exemplo, um segredo chamado `department`é montado para o arquivo `/etc/secretspot` via de volume `mongodb`para as seguintes microservices: `department-service`, `employee-service`, `organization-service`.
+
+```file
+/spring-microservices-k8s/department-service/src/main/resources/bootstrap.yaml
+```
+
+```yaml
+spring:
+application:
+  name: department
+cloud:
+  kubernetes:
+    secrets:
+      enabled: true
+      paths:
+        - /etc/secretspot
+      enableApi: false
+      # other config removed for brevity.
+```
+
+```file
+/spring-microservices-k8s/k8s/department-deployment.yaml
+```
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: department
+  labels:
+    app: department
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: department
+  template:
+    metadata:
+      labels:
+        app: department
+    spec:
+      containers:
+        volumeMounts:
+          - name: mongodb
+            mountPath: /etc/secretspot
+      volumes:
+        - name: mongodb
+          secret:
+            secretName: department
+      # other config removed for brevity.
+```
+
+As credenciais do Mongo são definidas dentro do objeto secreto 
+
+```file
+/spring-microservices-k8s/k8s/department-secret.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: department
+type: Opaque
+data:
+  spring.data.mongodb.username: bW9uZ28tYWRtaW4=
+  spring.data.mongodb.password: bW9uZ28tYWRtaW4tcGFzc3dvcmQ=
+```
+
+## Utilizando Spring Boot Actuator para exportar métricas para Prometheus
