@@ -221,3 +221,134 @@ Cada serviço definido no cluster (incluindo o próprio servidor DNS) recebe um 
 Os registros DNS para cada serviços são os seguintes:
 
 ![Arquitetura de Referência - registros DNS para serviços](./resources/architecture-dns.png)
+
+## Configurando MongoBD
+
+### Implementando MongoBD
+
+A implementação do MongoBD é instruída a ler um ConfigMap para obter `database-name` e ler o secrets para obter `database-username` e `database-password`.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  labels:
+    app: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:4.2.3
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: mongodb
+                  key: database-name
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb
+                  key: database-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb
+                  key: database-password
+          resources:
+            requests:
+              cpu: "0.2"
+              memory: 300Mi
+            limits:
+              cpu: "1.0"
+              memory: 300Mi
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 50
+            timeoutSeconds: 2
+            periodSeconds: 20
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 50
+            timeoutSeconds: 2
+            periodSeconds: 20
+            failureThreshold: 5
+    serviceAccountName: api-service-account
+```
+
+### MongoBD ConfigMap
+
+Em um ConfigMap, o nome do banco de dados mongo é definido em `database-name`
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb
+data:
+  database-name: admin
+```
+
+### Secrets do MongoBD
+
+O nome de usuário e senha são definidos em `database-username` e `database-passoword` respectivamente. Como esté um objeto secreto, os valores devem ser codificados em base64.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb
+type: Opaque
+data:
+  database-user: bW9uZ28tYWRtaW4=
+  database-password: bW9uZ28tYWRtaW4tcGFzc3dvcmQ=
+```
+
+## Utilizando Spring Cloud Kubernete ConfigMap PropertySource
+
+O recurso PropertySource do Spring Cloud Kubernetes permite o consumo de objetos ConfigMap e Secret diretamente no aplicativo, sem injetá-los em uma implantação. O comportamento padrão é baseado em `metadata.name` ConfigMap ou Secret, que deve ser igual ao nome de um aplicativo definido pela propriedade `spring.aplication.name`.
+Por examplo, o ``department-service`` decompões-se da seguinte forma
+
+* `/spring-microservices-k8s/department-service/src/resources/bootstrap.yml`
+
+```yaml
+spring:
+  application:
+    name: department
+# other config removed for brevity.
+```
+
+* `/spring-microservices-k8s/k8s/department-configmap.yaml`
+
+```yaml
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: department
+data:
+  logging.pattern.console: "%clr(%d{yy-MM-dd E HH:mm:ss.SSS}){blue} %clr(%-5p) %clr(${PID}){faint} %clr(---){faint} %clr([%8.15t]){cyan} %clr(%-40.40logger{0}){blue} %clr(:){red} %clr(%m){faint}%n"
+  spring.cloud.kubernetes.discovery.all-namespaces: "true"
+  spring.data.mongodb.database: "admin"
+  spring.data.mongodb.host: "mongodb.mongo.svc.cluster.local"
+  spring.output.ansi.enabled: "ALWAYS"
+```
+
+* `data.logging.pattern.console`: define o padrão de registro
+* `data.spring.cloud.kubernetes.discovery.all-namespaces` : permite a descoberta de vários namespaces
+* `spring.data.mongodb.database`: Nome do Mongo DB
+* `spring.data.mongodb.host`: Localização do Mongo DB
+* `spring.output.ansi.enabled`: Aplicar saída ANSI
