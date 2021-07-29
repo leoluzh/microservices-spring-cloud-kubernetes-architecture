@@ -502,14 +502,14 @@ A partir do [Spring Boot 2.3.1.RELEASE](https://docs.spring.io/spring-boot/docs/
 
 Depois de construir o projeto com JARs em camadas usando `jarmode` suporte, instale o pacote usando Maven.
 
-```script zsh
+```shell zsh
 cd /spring-microservices-k8s/department-service/
 mvn clean install
 ```
 
 O JAR resultante pode ser testado para verificar se as camadas foram adicionadas.
 
-```script zsh
+```shell zsh
 cd /spring-microservices-k8s/department-service/
 java -Djarmode=layertools -jar target/department-service-1.1.jar list
 ```
@@ -581,7 +581,7 @@ ENTRYPOINT ["java", "org.springframework.boot.loader.JarLauncher"]
 
 Construir a imagem Docker para o `department-service` aplicativo
 
-```script
+```shell
 cd /spring-microservices-k8s/department-service/
 docker build -t vmware/department:1.1 .
 ```
@@ -590,8 +590,134 @@ e construir outros microservices: `employee-service`, `gateway-service`, `organi
 
 Listar imagens do Docker
 
-```
+```shell
 docker images
 ```
 
 A ferramenta [Dive](https://github.com/wagoodman/dive) pode ser usada para explorar e analisar imagens e camadas do Docker. O abaixo exibe a buildimage. O Docker `Image Id` pode ser usado para explorar detalhes da imagem.
+
+## Implamentando uma aplicação Spring Boot
+
+Criamos namespace `department`, atribuímos `cluster-admin` e contruímos imagens `Docker` nas etapas anteriores
+
+`department-service` é um manifesto de implantação do Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: department
+  labels:
+    app: department
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: department
+  template:
+    metadata:
+      labels:
+        app: department
+    spec:
+      containers:
+        - name: department
+          image: vmware/department:1.1
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "0.2"
+              memory: 300Mi
+            limits:
+              cpu: "1.0"
+              memory: 300Mi
+          readinessProbe:
+            httpGet:
+              port: 8080
+              path: /actuator/health
+            initialDelaySeconds: 60
+            timeoutSeconds: 2
+            periodSeconds: 20
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              port: 8080
+              path: /actuator/info
+            initialDelaySeconds: 60
+            timeoutSeconds: 2
+            periodSeconds: 20
+            failureThreshold: 5
+      serviceAccountName: api-service-account
+```
+As cargas de trabalho devem sempre explicitamente especificadas
+
+`spec.template.spec.containers.resources.requests` e 
+
+`spec.template.spec.containers.resources.limits` e manter 
+
+`spec.template.spec.containers.resources.requests.memory` e
+
+`spec.template.spec.containers.resources.limits.memory` iguais , pois a RAM não é um recurso compactável como a CPU.
+
+### Recomendações para sondas (probes) de aplicação:
+
+ * `readinessProbe`: Sempre, torna o aplicativo disponível para tráfego após a aprovação das verificações.
+ * `livenessProbe`: Usualmente, só deve verificar as condições em que reiniciar o aplicativo é uma solução apropriada. Certifique-se de não vincular essa verificação a dependências externas, como conectividade de banco de dados, ou poderá produzir falhas em cascata. Uma boa verificação pode ser atingir um endpoint, alocar alguma memória (por exemplo, matriz de bytes) e retornar um código `200`.
+ * `startupProbe`: Raramente, as sondagens de prontidão e atividade (com um atraso) podem normalmente resolver o caso de uso que startupProbe tenta resolver. Se uma verificação específica for apropriada para um aplicativo que tem uma inicialização lenta a verificação nunca deve ser executada novamente, um `startupProbe` pode ser justificado.
+
+O kubernetes aproveita as sondagens (probes/actuators) para determinar se o aplicativo está pronto para aceitar tráfego e se o aplicativo está ativo.
+
+* Se `readinessProbe` não retornar código `200` - nenhum tráfego será roteado para ele. 
+* Se `livenessProbe` não retornar código `200` - o kubernetes reiniciará o pod.
+
+Spring boot tem um conjunto integrado de endpoints do módulo [`Actuator`](https://docs.spring.io/spring-boot/docs/current/reference/html/actuator.html)
+
+* `/actuator/health` : fornece informações básicas de integridade do aplicativo
+* `/actuator/info` : fornece informações arbitrárias do aplicativo
+
+Para adicionar o `Actuator`a um projeto baseado em Maven, adicione a seguinte dependência `Starter`
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+</dependencies>
+```
+Para implantar `department-service` no kubernetes, execute o seguinte comando.
+
+```shell
+kubectl apply -n department -f ./spring-microservices-k8s/k8s/department-configmap.yaml
+```
+
+[`Octant`](https://github.com/vmware-tanzu/octant) é uma ótima ferramenta de código aberto que pode visualizar graficamente dependências de objetos kubernetes, encaminhar portas locais para um pod em execução, inspecionar logs de pod, navegar por diferentes clusters e ajudar os desenvolvedores a entender como os aplicativos são executados em um ambiente kubernete.
+
+Visão geral do namespace `department` 
+
+![Octant namespace department](./resources/octant-namespace-department.png)
+
+Recursos associados ao pod implantado no namespace `department`
+
+![Octant namepace department deployment](./resources/octante-namespace-department-deployment.png)
+
+
+## Expondo um serviço
+
+Utilizaremos a porta `8080` e tipo `NodePort` para expor todos os microserviços. A seguinte definição de serviço agrupa todos os pods rotulados com o campo `app` igual a `department`.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: department
+  labels:
+    app: department
+spec:
+  ports:
+    - port: 8080
+      protocol: TCP
+  selector:
+    app: department
+  type: NodePort
+```
