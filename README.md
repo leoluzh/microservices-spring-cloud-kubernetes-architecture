@@ -721,3 +721,240 @@ spec:
     app: department
   type: NodePort
 ```
+
+## Configurando serviço de gateway
+
+Utilizaremos o serviço `gateway-service` para expor a documentação do Swagger gerada automáticamente por meio da interface wbe Swagger UI para todos os microserviços distruídos entre os diversos namespaces. Para fazer isso, utilizaremos o `Spring Cloud Netflix Zuul`, que se integra à descoberta do kubernetes por meio do cliente `Ribbon`. 
+
+Dependências necessárias:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-netflix-zuul</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-kubernetes-all</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-sleuth</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>io.springfox</groupId>
+        <artifactId>springfox-swagger-ui</artifactId>
+        <version>2.9.2</version>
+    </dependency>
+    <dependency>
+        <groupId>io.springfox</groupId>
+        <artifactId>springfox-swagger2</artifactId>
+        <version>2.9.2</version>
+    </dependency>
+</dependencies>
+```
+
+As configurações de rotas é direta e utiliza o Spring Cloud Kubernetes Discovery
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway
+data:
+  logging.pattern.console: "%d{HH:mm:ss} ${LOG_LEVEL_PATTERN:-%5p} %m%n"
+  spring.cloud.kubernetes.discovery.all-namespaces: "true"
+  zuul.routes.department.path: "/department/**"
+  zuul.routes.employee.path: "/employee/**"
+  zuul.routes.organization.path: "/organization/**"
+```
+
+Como o proxy `Zuul` é integrado automaticamente ao `DiscoveryClient`, é fácil configurar resolução dinâmica de endpoints de microserviços pelo Swagger.
+
+```java
+@Configuration
+public class GatewayApi {
+
+    @Autowired
+    ZuulProperties properties;
+
+    @Primary
+    @Bean
+    public SwaggerResourcesProvider swaggerResourcesProvider() {
+        return () -> {
+            List<SwaggerResource> resources = new ArrayList<>();
+            properties.getRoutes().values().stream()
+                    .forEach(route -> resources.add(createResource(route.getId(), "2.0")));
+            return resources;
+        };
+    }
+
+    private SwaggerResource createResource(String location, String version) {
+        SwaggerResource swaggerResource = new SwaggerResource();
+        swaggerResource.setName(location);
+        swaggerResource.setLocation("/" + location + "/v2/api-docs");
+        swaggerResource.setSwaggerVersion(version);
+        return swaggerResource;
+    }
+
+}
+```
+
+Configure o client Ribbon para permitir a descoberta em todos os namespaces.
+
+```java
+public class RibbonConfiguration {
+
+    @Autowired
+    private DiscoveryClient discoveryClient;
+
+    private String serviceId = "client";
+    protected static final String VALUE_NOT_SET = "__not__set__";
+    protected static final String DEFAULT_NAMESPACE = "ribbon";
+
+    public RibbonConfiguration () {
+    }
+
+    public RibbonConfiguration (String serviceId) {
+        this.serviceId = serviceId;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ServerList<?> ribbonServerList(IClientConfig config) {
+
+        Server[] servers = discoveryClient.getInstances(config.getClientName()).stream()
+                .map(i -> new Server(i.getHost(), i.getPort()))
+                .toArray(Server[]::new);
+
+        return new StaticServerList(servers);
+    }
+
+}
+```
+
+A configuração de faixa de opções deve ser aplicada na classe principal do aplicativo:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableZuulProxy
+@EnableSwagger2
+@AutoConfigureAfter(RibbonAutoConfiguration.class)
+@RibbonClients(defaultConfiguration = RibbonConfiguration.class)
+public class GatewayApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(GatewayApplication.class, args);
+    }
+
+}
+```
+
+## UI do Gateway Swagger
+
+A UI Swagger é exposta no serviço de gateway e mostra uma vantagem de namespace cruzado `employee-service`, onde, `department-service` e `organization-service` estão disponíveis via `gateway-service`.
+
+![Gateway Swagger](./resources/gateway-swagger.png)
+
+## Configurando o Ingress
+
+Kubernetes Ingress é um conjunto de regras que permiter que as solicitações recebidas cheguema aos serviços downstream. Ele funcione quase como um serviço com tipo `LoadBalancer`, mas você pode definir regras de roteamento personalizadas. O manifesto YAML precisa ser definido `host` como um nome de host sob o qual o gateway estará disponível. Em nossa arquitetura de microserviços, o Ingress tem a função de um gateway de API.
+
+![Kubernetes Ingress](./resources/kubernetes-ingress.png)
+
+```yaml
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: gateway-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  backend:
+    serviceName: default-http-backend
+    servicePort: 80
+  rules:
+    - host: microservices-cluster.info
+      http:
+        paths:
+          - path: /employee
+            backend:
+              serviceName: employee
+              servicePort: 8080
+          - path: /department
+            backend:
+              serviceName: department
+              servicePort: 8080
+          - path: /organization
+            backend:
+              serviceName: organization
+              servicePort: 8080
+```
+
+Execute os seguintes comandos para aplicar a configuração acima no cluster Kubernetes
+
+```shell
+cd /spring-microservices-k8s/k8s/
+kubectl apply -f ingress.yaml
+```
+
+## Teste de entrada
+
+Execute os seguintes comando para preencher o MongoDB com dados de Teste
+
+```shell
+cd /spring-microservices-k8s/scrips/
+./populate-data.sh
+```
+
+Execute o comando abaixo para verificar se `department-service` está disponível via `Ingress`
+
+```shell
+curl http://microservices-cluster.info/department/1/with-employees | jq
+```
+
+Exemplo de saída de `department-service`
+
+```json
+{
+  "address": "Main Street",
+  "id": "1",
+  "name": "MegaCorp"
+  "departments": [
+    {
+      "employees": [
+        {
+          "age": 25,
+          "id": 1,
+          "name": "Smith",
+          "position": "engineer"
+        },
+        {
+        "age": 45,
+        "id": 2,
+        "name": "Johns",
+        "position": "manager"
+        }
+      ],
+      "id": 1,
+      "name": "RD Dept."
+    }
+  ],
+  "employees": [
+    {
+      "age": 25,
+      "id": 1,
+      "name": "Smith",
+      "position": "engineer"
+    },
+    {
+      "age": 45,
+      "id": 2,
+      "name": "Johns",
+      "position": "manager"
+    }
+  ],
+}
+```
